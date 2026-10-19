@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VOB → MP4 変換</title>
+<style>
+body{font-family:system-ui,"Yu Gothic UI",Meiryo,sans-serif;background:#f3f5f9;color:#172033;margin:0}
+main{max-width:760px;margin:28px auto;padding:0 14px 30px}.card{background:#fff;border:1px solid #dce2eb;border-radius:16px;padding:22px}
+h1{font-size:26px;margin:0 0 8px}.muted{color:#5c6678;line-height:1.6}
+.notice{background:#fff4d8;border:1px solid #ead18c;padding:12px;border-radius:10px;line-height:1.6;font-size:14px;margin:14px 0}
+label{display:block;font-weight:650;margin:18px 0 8px}input[type=file]{box-sizing:border-box;width:100%;padding:12px;border:1px dashed #9aa8bd;border-radius:10px}
+button{border:0;border-radius:10px;padding:12px 16px;font-size:15px;font-weight:700;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.primary{background:#2459d3;color:white}.secondary{background:#edf0f5;color:#172033}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}#status{white-space:pre-wrap;line-height:1.6;color:#5c6678;margin-top:15px;overflow-wrap:anywhere}progress{width:100%;height:14px;margin-top:14px}small{display:block;color:#5c6678;line-height:1.6;margin-top:7px}
+</style>
+</head>
+<body><main><section class="card">
+<h1>VOB → MP4 変換</h1>
+<p class="muted">ブラウザ内で動画を変換する試作ページです。</p>
+<div class="notice"><b>プライバシー：</b>選択した動画をアップロードする処理はありません。変換エンジンはCDNから読み込みます。学校のネットワークやブラウザの制限で動作しない場合があります。公開するのはツールのファイルだけにし、動画はGitHubにアップロードしないでください。</div>
+<label for="files">1. VOBファイルを選択（複数可）</label><input id="files" type="file" accept=".vob,.VOB" multiple>
+<small>同じタイトルのVOBを正しい順番で選択してください。DVDのIFO情報から本編を自動判定する機能はありません。</small>
+<label>2. 変換エンジン</label><div class="row"><button id="load" class="secondary">変換エンジンを読み込む</button></div>
+<label>3. 画質</label><div class="row"><label style="margin:0;font-weight:400"><input type="radio" name="q" value="18" checked> 高画質</label><label style="margin:0;font-weight:400"><input type="radio" name="q" value="23"> 標準</label></div>
+<div class="row"><button id="go" class="primary" disabled>MP4に変換</button><button id="reset" class="secondary">リセット</button></div>
+<progress id="progress" max="100" value="0" hidden></progress><div id="status">VOBファイルを選択してください。</div>
+<small>出力はH.264/AACのMP4です。長い動画や大容量ファイルはメモリ不足で失敗する場合があります。変換後、冒頭・中盤・終盤で音ズレを確認してください。</small>
+</section></main>
+<!-- Older UMD build is used here to avoid the newer ESM worker import failure seen in GAS. -->
+<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);let ff=null,loaded=false,busy=false,files=[];
+function status(t){$('status').textContent=t}
+function update(){ $('go').disabled=!(loaded&&files.length&&!busy); }
+$('files').addEventListener('change',()=>{files=Array.from($('files').files||[]);status(files.length?`選択：${files.length}ファイル / 合計 ${(files.reduce((a,f)=>a+f.size,0)/1048576).toFixed(1)} MB`:'VOBファイルを選択してください。');update()});
+$('load').addEventListener('click',async()=>{
+ if(loaded||busy)return;$('load').disabled=true;status('変換エンジンを読み込んでいます。初回は時間がかかることがあります。');
+ try{
+  if(!window.FFmpeg||!window.FFmpeg.createFFmpeg)throw new Error('FFmpegライブラリを読み込めません。CDNが学校のネットワークでブロックされていないか確認してください。');
+  const {createFFmpeg,fetchFile}=window.FFmpeg;
+  ff=createFFmpeg({log:true,corePath:'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',logger:({message})=>{if(message&&/frame=|error|Error/i.test(message))status(message)},progress:({ratio})=>{if(Number.isFinite(ratio)){$('progress').hidden=false;$('progress').value=Math.max(0,Math.min(100,Math.round(ratio*100)))}}});
+  await ff.load();window._vobFetchFile=fetchFile;loaded=true;status('変換エンジンを読み込みました。'); 
+ }catch(e){console.error(e);status('読み込み失敗：CDN、Worker、または学校のブラウザ制限の可能性があります。\\n'+(e.message||String(e)))}
+ finally{$('load').disabled=loaded;update()}
+});
+$('go').addEventListener('click',async()=>{
+ if(!loaded||!files.length||busy)return;busy=true;update();$('load').disabled=true;$('progress').hidden=false;$('progress').value=0;
+ const sum=files.reduce((a,f)=>a+f.size,0);if(sum>600*1048576&&!confirm('合計600MBを超えています。メモリ不足の可能性があります。続行しますか？')){busy=false;update();$('load').disabled=false;return}
+ try{
+  const {fetchFile}=window.FFmpeg;const ext=f=>f.name.toLowerCase().endsWith('.vob');
+  const clean=(files[0].name.replace(/_[0-9]+\.vob$/i,'').replace(/\.vob$/i,'').replace(/[\\/:*?"<>|]/g,'_')||'dvd_video');
+  let inName='input.vob';
+  if(files.length===1){ff.FS('writeFile',inName,await fetchFile(files[0]))}
+  else{
+   // For concatenation, copy bytes in selected order. This is not reliable for every DVD title.
+   const parts=[];let total=0;for(let i=0;i<files.length;i++){status(`ファイルを読み込み中 ${i+1}/${files.length}`);const b=await fetchFile(files[i]);parts.push(b);total+=b.length}
+   const joined=new Uint8Array(total);let pos=0;for(const b of parts){joined.set(b,pos);pos+=b.length}ff.FS('writeFile',inName,joined)
+  }
+  const out=clean+'_YouTube.mp4';const crf=document.querySelector('input[name="q"]:checked').value;
+  status('MP4へ変換中です。処理中はタブを閉じないでください。');
+  await ff.run('-fflags','+genpts','-i',inName,'-map','0:v:0','-map','0:a:0?','-c:v','libx264','-preset','ultrafast','-crf',crf,'-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-af','aresample=async=1:first_pts=0','-movflags','+faststart',out);
+  const data=ff.FS('readFile',out);const blob=new Blob([data.buffer],{type:'video/mp4'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=out;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+  status(`変換処理が終了しました。\n保存ファイル：${out}\n必ず再生して音ズレや途中切れを確認してください。`);
+  try{ff.FS('unlink',inName);ff.FS('unlink',out)}catch{}
+ }catch(e){console.error(e);status('変換失敗：VOBの構造、ファイル順、メモリ容量、またはブラウザ制限を確認してください。\\n'+(e.message||String(e)))}
+ finally{busy=false;$('load').disabled=loaded;update()}
+});
+$('reset').addEventListener('click',()=>{if(busy)return;$('files').value='';files=[];$('progress').hidden=true;$('progress').value=0;status(loaded?'変換エンジンは読み込み済みです。VOBを選択してください。':'VOBファイルを選択してください。');update()});
+</script></body></html>
